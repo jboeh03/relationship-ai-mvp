@@ -1,51 +1,62 @@
 # app.py
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from passlib.context import CryptContext
 import sqlite3
-import time
+from passlib.context import CryptContext
 
-app = FastAPI()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-DB_PATH = "users.db"
-DB_TIMEOUT = 10  # seconds
-DB_RETRIES = 5   # number of retries if locked
-
-# Pydantic models
+# --------------------------
+# Models
+# --------------------------
 class User(BaseModel):
     email: str
     password: str
 
-# Helper functions
+# --------------------------
+# App & CORS
+# --------------------------
+app = FastAPI()
+
+origins = [
+    "https://relationship-ai-mvp.vercel.app",
+    "http://localhost:3000"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --------------------------
+# Password hashing
+# --------------------------
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 def get_password_hash(password: str) -> str:
-    # bcrypt only supports max 72 bytes
+    # truncate to 72 bytes for bcrypt
     truncated = password[:72]
     return pwd_context.hash(truncated)
 
-def get_db_connection():
-    """Return a SQLite connection with timeout and retry if locked."""
-    attempt = 0
-    while attempt < DB_RETRIES:
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-            return conn
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e):
-                attempt += 1
-                time.sleep(1)
-            else:
-                raise
-    raise Exception("Could not acquire database connection after retries")
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    truncated = plain_password[:72]
+    return pwd_context.verify(truncated, hashed_password)
+
+# --------------------------
+# Database setup
+# --------------------------
+DB_PATH = "users.db"
 
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            password TEXT
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -53,54 +64,47 @@ def init_db():
 
 init_db()
 
+# --------------------------
 # Routes
+# --------------------------
+@app.get("/")
+def root():
+    return {"message": "Backend is live!"}
+
 @app.post("/signup")
 def signup(user: User):
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Check if email already exists
+
+    # Check if email exists
     cursor.execute("SELECT * FROM users WHERE email = ?", (user.email,))
-    if cursor.fetchone():
+    existing_user = cursor.fetchone()
+    if existing_user:
         conn.close()
         raise HTTPException(status_code=400, detail="Email already registered")
 
     password_hash = get_password_hash(user.password)
-
-    # Insert new user safely
-    attempt = 0
-    while attempt < DB_RETRIES:
-        try:
-            cursor.execute(
-                "INSERT INTO users (email, password) VALUES (?, ?)",
-                (user.email, password_hash)
-            )
-            conn.commit()
-            conn.close()
-            return {"email": user.email, "message": "User created successfully"}
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e):
-                attempt += 1
-                time.sleep(1)
-            else:
-                conn.close()
-                raise
+    cursor.execute(
+        "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+        (user.email, password_hash)
+    )
+    conn.commit()
     conn.close()
-    raise HTTPException(status_code=500, detail="Database is locked, try again later")
+    return {"email": user.email, "message": "User created successfully"}
 
 @app.post("/login")
 def login(user: User):
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT password FROM users WHERE email = ?", (user.email,))
-    row = cursor.fetchone()
+    cursor.execute("SELECT * FROM users WHERE email = ?", (user.email,))
+    db_user = cursor.fetchone()
     conn.close()
 
-    if not row:
+    if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    stored_password_hash = row[0]
-    truncated_password = user.password[:72]  # bcrypt max 72 bytes
-    if not pwd_context.verify(truncated_password, stored_password_hash):
-        raise HTTPException(status_code=401, detail="Incorrect password")
+    _, email, password_hash = db_user
+    if not verify_password(user.password, password_hash):
+        raise HTTPException(status_code=400, detail="Invalid password")
 
-    return {"email": user.email, "message": "Login successful"}
+    return {"email": email, "message": "Login successful"}
