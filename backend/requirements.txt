@@ -1,5 +1,5 @@
-fastapi
-uvicorn[standard]
-python-jose[cryptography]
-passlib[bcrypt]
-python-dotenv
+fastapi==0.110.0
+uvicorn==0.25.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+pydantic==2.3.0
